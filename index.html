@@ -388,6 +388,8 @@ input[type="checkbox"] {
 .icon-btn:active { background: var(--border); }
 .icon-btn.danger { border-color: var(--red); color: var(--red); }
 .icon-btn.danger:active { background: rgba(207,102,121,.18); }
+.icon-btn:disabled { opacity: .3; cursor: not-allowed; }
+.icon-btn.disabled { opacity: .3; cursor: not-allowed; }
 
 .empty-state {
   text-align: center;
@@ -474,6 +476,18 @@ input[type="checkbox"] {
     </div>
   </div>
 
+  <!-- ===== Visual settings card ===== -->
+  <div class="card">
+    <div class="card-title">Visual Feedback</div>
+    <label class="toggle-wrap">
+      <span class="toggle-switch">
+        <input type="checkbox" id="vuToggle" checked onchange="onVuToggleChange()">
+        <span class="toggle-track"></span>
+      </span>
+      <span class="toggle-label-text">Show loudness meter</span>
+    </label>
+  </div>
+
   <!-- ===== Storage card ===== -->
   <div class="card">
     <div class="card-title">Storage</div>
@@ -552,6 +566,9 @@ let splitTimeoutId  = null;
 let timerIntervalId = null;
 let vuRafId         = null;
 let toastTimerId    = null;
+let wakeLock        = null;   // wake lock sentinel
+let vuEnabled       = true;   // VU meter toggle state
+let currentAudio    = null;   // currently playing audio element
 
 // ─────────────────────────────────────────────
 // IndexedDB
@@ -701,10 +718,42 @@ async function persistSegment(timestamp, blob, durationMs, mime) {
 }
 
 // ─────────────────────────────────────────────
+// Wake Lock
+// ─────────────────────────────────────────────
+async function requestWakeLock() {
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => {
+        console.log('Wake Lock released');
+      });
+      console.log('Wake Lock acquired');
+    } catch (err) {
+      console.error('Wake Lock error:', err);
+    }
+  }
+}
+
+async function releaseWakeLock() {
+  if (wakeLock) {
+    try {
+      await wakeLock.release();
+      wakeLock = null;
+    } catch (err) {
+      console.error('Wake Lock release error:', err);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────
 // Start recording
 // ─────────────────────────────────────────────
 async function startRecording() {
   if (isRecording) return;
+  
+  // Stop any playing audio before starting recording
+  stopCurrentAudio();
+  
   setStatus('Requesting microphone…');
   try {
     const stream = await ensureStream();
@@ -721,6 +770,7 @@ async function startRecording() {
     mediaRecorder = makeRecorder(stream, mimeType, c => recChunks.push(c));
     mediaRecorder.start(RECORDER_TIMESLICE_MS);
 
+    await requestWakeLock();
     startTimer();
     startVU();
     if (splitEnabled()) scheduleSplit();
@@ -809,6 +859,7 @@ async function stopRecordingUser(msg) {
 async function finishStop(chunks, ts, durationMs, mime) {
   stopTimer();
   stopVU();
+  await releaseWakeLock();
 
   if (chunks.length) {
     const blob = new Blob(chunks, { type: mime || 'audio/webm' });
@@ -902,7 +953,15 @@ function stopVU() {
 
 function drawVU() {
   vuRafId = requestAnimationFrame(drawVU);
-  if (!analyserNode) return;
+  if (!analyserNode || !vuEnabled) {
+    // Draw idle state if VU is disabled
+    if (!vuEnabled) {
+      cctx.clearRect(0, 0, canvas.width, canvas.height);
+      cctx.fillStyle = '#252525';
+      cctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    return;
+  }
 
   const W   = canvas.width;
   const H   = canvas.height;
@@ -945,6 +1004,8 @@ function updateRecordUI(recording) {
   document.getElementById('recordLabel').textContent = recording ? 'Stop' : 'Record';
   btn.className = 'record-btn' + (recording ? ' recording' : '');
   updateSegBadge();
+  // Refresh list to update play button states
+  refreshList().catch(console.error);
 }
 
 function updateSegBadge() {
@@ -983,6 +1044,14 @@ function adjustInterval(delta) {
   const inp = document.getElementById('intervalInput');
   inp.value = Math.max(INTERVAL_MIN, Math.min(INTERVAL_MAX, (parseInt(inp.value, 10) || DEFAULT_SPLIT_INTERVAL_MIN) + delta));
   onIntervalChange();
+}
+
+function onVuToggleChange() {
+  vuEnabled = document.getElementById('vuToggle').checked;
+  localStorage.setItem('vuEnabled', vuEnabled ? 'true' : 'false');
+  if (!vuEnabled && !isRecording) {
+    stopVU(); // redraw idle state
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -1045,9 +1114,13 @@ async function refreshList() {
   document.getElementById('selAllCb').checked       = false;
   document.getElementById('selAllCb').indeterminate = false;
 
+  const playbackAllowed = await canUsePlayback();
+
   listEl.innerHTML = recs.map(r => {
     const ext  = extFor(r.mimeType);
     const name = new Date(r.timestamp).toISOString().replace(/[:.]/g, '-') + '.' + ext;
+    const playBtnDisabled = playbackAllowed ? '' : ' disabled';
+    const playBtnTitle = playbackAllowed ? 'Play' : 'Playback disabled during recording';
     return `<div class="rec-item" data-ts="${r.timestamp}">
       <input type="checkbox" class="rec-cb" data-ts="${r.timestamp}" onchange="onCbChange()">
       <div class="rec-info">
@@ -1055,6 +1128,7 @@ async function refreshList() {
         <div class="rec-meta">${fmtDuration(r.durationMs)} &nbsp;·&nbsp; ${fmtSize(r.size)} &nbsp;·&nbsp; ${shortMime(r.mimeType)}</div>
       </div>
       <div class="rec-actions">
+        <button class="icon-btn play-btn${playBtnDisabled}" title="${playBtnTitle}" onclick="playRecording(${r.timestamp}, this)" ${playbackAllowed ? '' : 'disabled'}>▶</button>
         <button class="icon-btn" title="Download" onclick="downloadOne(${r.timestamp})">⬇</button>
         <button class="icon-btn danger" title="Delete" onclick="deleteOne(${r.timestamp})">🗑</button>
       </div>
@@ -1141,6 +1215,98 @@ async function batchDelete() {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ─────────────────────────────────────────────
+// Audio playback
+// ─────────────────────────────────────────────
+function stopCurrentAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.currentTime = 0;
+    currentAudio = null;
+  }
+  // Update all play buttons back to play state
+  document.querySelectorAll('.play-btn').forEach(btn => {
+    btn.textContent = '▶';
+    btn.title = 'Play';
+  });
+}
+
+async function playRecording(ts, btnElement) {
+  // If currently playing this recording, stop it
+  if (currentAudio && currentAudio.dataset.ts == ts) {
+    stopCurrentAudio();
+    return;
+  }
+  
+  // Stop any other playing audio
+  stopCurrentAudio();
+  
+  const rec = await dbGet(ts);
+  if (!rec) return;
+  
+  const audio = new Audio(URL.createObjectURL(rec.blob));
+  audio.dataset.ts = ts;
+  currentAudio = audio;
+  
+  btnElement.textContent = '⏸';
+  btnElement.title = 'Pause';
+  
+  audio.onended = () => {
+    stopCurrentAudio();
+  };
+  
+  audio.onerror = () => {
+    stopCurrentAudio();
+    showToast('Playback error', 'err');
+  };
+  
+  try {
+    await audio.play();
+  } catch (err) {
+    stopCurrentAudio();
+    showToast('Playback failed: ' + err.message, 'err');
+  }
+}
+
+async function canUsePlayback() {
+  // Check if we can detect audio output devices
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    return true; // Can't detect, so allow playback
+  }
+  
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
+    
+    // If we can't enumerate or no specific outputs found, allow playback
+    if (!audioOutputs.length) return true;
+    
+    // Check if any device looks like headphones/earbuds
+    // Common patterns in device labels: headphone, earphone, earbud, headset, airpods, etc.
+    const hasHeadphones = audioOutputs.some(d => {
+      const label = (d.label || '').toLowerCase();
+      return label.includes('headphone') || 
+             label.includes('headset') || 
+             label.includes('earbud') ||
+             label.includes('earphone') ||
+             label.includes('airpod') ||
+             label.includes('bluetooth') ||
+             label.includes('usb audio');
+    });
+    
+    // If recording and only built-in speakers available, disable playback
+    if (isRecording && !hasHeadphones) {
+      return false;
+    }
+    
+    return true;
+  } catch (err) {
+    // If detection fails, allow playback
+    console.warn('Audio device detection failed:', err);
+    return true;
+  }
+}
+
+// ─────────────────────────────────────────────
 // Toast
 // ─────────────────────────────────────────────
 function showToast(msg, type) {
@@ -1163,6 +1329,13 @@ async function init() {
 
   // Initialize spinner group visual state (disabled until toggle is on)
   document.getElementById('spinnerGroup').className = 'spinner-group disabled';
+
+  // Load VU meter preference
+  const vuPref = localStorage.getItem('vuEnabled');
+  if (vuPref !== null) {
+    vuEnabled = vuPref === 'true';
+    document.getElementById('vuToggle').checked = vuEnabled;
+  }
 
   await dbOpen();
   await refreshList();
