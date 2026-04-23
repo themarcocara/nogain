@@ -1050,7 +1050,7 @@ function onVuToggleChange() {
   vuEnabled = document.getElementById('vuToggle').checked;
   localStorage.setItem('vuEnabled', vuEnabled ? 'true' : 'false');
   if (!vuEnabled && !isRecording) {
-    stopVU(); // redraw idle state
+    stopVU(); // clear and draw idle background
   }
 }
 
@@ -1232,7 +1232,7 @@ function stopCurrentAudio() {
 
 async function playRecording(ts, btnElement) {
   // If currently playing this recording, stop it
-  if (currentAudio && currentAudio.dataset.ts == ts) {
+  if (currentAudio && currentAudio.dataset.ts === ts) {
     stopCurrentAudio();
     return;
   }
@@ -1289,8 +1289,7 @@ async function canUsePlayback() {
              label.includes('earbud') ||
              label.includes('earphone') ||
              label.includes('airpod') ||
-             label.includes('bluetooth') ||
-             label.includes('usb audio');
+             label.includes('bluetooth');
     });
     
     // If recording and only built-in speakers available, disable playback
